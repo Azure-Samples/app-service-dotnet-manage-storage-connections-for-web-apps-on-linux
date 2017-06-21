@@ -1,4 +1,4 @@
-﻿// Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
 using Microsoft.Azure.Management.AppService.Fluent;
@@ -92,7 +92,7 @@ namespace ManageLinuxWebAppStorageAccountConnection
 
                 Utilities.Log("Deploying azure-samples-blob-traverser.war to " + app1Name + " through FTP...");
 
-                Utilities.UploadFileToFtp(
+                Utilities.UploadFileToWebApp(
                     app1.GetPublishingProfile(),
                     Path.Combine(Utilities.ProjectPath, "Asset", "azure-samples-blob-traverser.war"));
 

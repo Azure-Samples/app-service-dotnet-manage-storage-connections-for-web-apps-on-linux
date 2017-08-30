@@ -1,0 +1,2 @@
+C:\Sources\dotnet-samples\app-service-dotnet-manage-storage-connections-for-web-apps-on-linux\bin\Debug\netstandard1.6\ManageLinuxWebAppStorageAccountConnection.deps.json
+C:\Sources\dotnet-samples\app-service-dotnet-manage-storage-connections-for-web-apps-on-linux\obj\Debug\netstandard1.6\ManageLinuxWebAppStorageAccountConnection.csproj.CoreCompileInputs.cache

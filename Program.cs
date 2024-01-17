@@ -1,15 +1,25 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
-using Microsoft.Azure.Management.AppService.Fluent;
-using Microsoft.Azure.Management.AppService.Fluent.Models;
-using Microsoft.Azure.Management.Fluent;
-using Microsoft.Azure.Management.ResourceManager.Fluent;
-using Microsoft.Azure.Management.ResourceManager.Fluent.Core;
-using Microsoft.Azure.Management.Samples.Common;
-using Microsoft.Azure.Management.Storage.Fluent;
+using Azure;
+using Azure.Core;
+using Azure.Identity;
+using Azure.ResourceManager;
+using Azure.ResourceManager.AppService;
+using Azure.ResourceManager.AppService.Models;
+using Azure.ResourceManager.Resources;
+using Azure.ResourceManager.Samples.Common;
+using Azure.ResourceManager.Sql;
+using Azure.ResourceManager.Sql.Models;
+using Azure.ResourceManager.Storage;
+using Azure.ResourceManager.Storage.Models;
+using Azure.Storage.Blobs;
 using System;
 using System.IO;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Xml.Linq;
 
 namespace ManageLinuxWebAppStorageAccountConnection
 {
@@ -24,13 +34,16 @@ namespace ManageLinuxWebAppStorageAccountConnection
          *  - Deploy a Tomcat application that reads from the storage account
          *  - Clean up
          */
-        public static void RunSample(IAzure azure)
+        public static async Task RunSample(ArmClient client)
         {
-            string app1Name       = SdkContext.RandomResourceName("webapp1-", 20);
+            AzureLocation region = AzureLocation.EastUS;
+            string app1Name       = Utilities.CreateRandomName("webapp1-");
             string app1Url        = app1Name + SUFFIX;
-            string storageName    = SdkContext.RandomResourceName("jsdkstore", 20);
-            string containerName  = SdkContext.RandomResourceName("jcontainer", 20);
-            string rgName         = SdkContext.RandomResourceName("rg1NEMV_", 24);
+            string storageName    = Utilities.CreateRandomName("jsdkstore");
+            string containerName  = Utilities.CreateRandomName("jcontainer");
+            string rgName         = Utilities.CreateRandomName("rg1NEMV_");
+            var lro = await client.GetDefaultSubscription().GetResourceGroups().CreateOrUpdateAsync(Azure.WaitUntil.Completed, rgName, new ResourceGroupData(AzureLocation.EastUS));
+            var resourceGroup = lro.Value;
 
             try {
 
@@ -39,26 +52,25 @@ namespace ManageLinuxWebAppStorageAccountConnection
 
                 Utilities.Log("Creating storage account " + storageName + "...");
 
-                IStorageAccount storageAccount = azure.StorageAccounts.Define(storageName)
-                        .WithRegion(Region.USWest)
-                        .WithNewResourceGroup(rgName)
-                        .Create();
+                var accountCollection = resourceGroup.GetStorageAccounts();
+                var accountData = new StorageAccountCreateOrUpdateContent(new StorageSku("sku"), StorageKind.Storage, region);
+                var account_lro = await accountCollection.CreateOrUpdateAsync(WaitUntil.Completed, storageName, accountData);
+                var storageAccount = account_lro.Value;
 
-                string accountKey = storageAccount.GetKeys()[0].Value;
+                string accountKey = storageAccount.GetKeys().FirstOrDefault().Value;
 
                 string connectionString = string.Format("DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1}",
-                        storageAccount.Name, accountKey);
+                        storageAccount.Data.Name, accountKey);
 
-                Utilities.Log("Created storage account " + storageAccount.Name);
+                Utilities.Log("Created storage account " + storageAccount.Data.Name);
 
                 //============================================================
                 // Upload a few files to the storage account blobs
 
                 Utilities.Log("Uploading 2 blobs to container " + containerName + "...");
-
-                Utilities.UploadFilesToContainer(
-                    connectionString,
-                    containerName,
+                var blobClient = new BlobContainerClient(connectionString, containerName);
+                await Utilities.UploadFromFileAsync(
+                    blobClient,
                     new[]
                     {
                         Path.Combine(Utilities.ProjectPath, "Asset", "helloworld.war"),
@@ -72,19 +84,44 @@ namespace ManageLinuxWebAppStorageAccountConnection
 
                 Utilities.Log("Creating web app " + app1Name + "...");
 
-                IWebApp app1 = azure.WebApps.Define(app1Name)
-                        .WithRegion(Region.USWest)
-                        .WithExistingResourceGroup(rgName)
-                        .WithNewLinuxPlan(PricingTier.StandardS1)
-                        .WithPublicDockerHubImage("tomcat:8-jre8")
-                        .WithStartUpCommand("/bin/bash -c \"sed -ie 's/appBase=\\\"webapps\\\"/appBase=\\\"\\\\/home\\\\/site\\\\/wwwroot\\\\/webapps\\\"/g' conf/server.xml && catalina.sh run\"")
-                        .WithConnectionString("storage.connectionString", connectionString, ConnectionStringType.Custom)
-                        .WithAppSetting("storage.containerName", containerName)
-                        .WithAppSetting("PORT", "8080")
-                        .Create();
+                var webSiteCollection = resourceGroup.GetWebSites();
+                var webSiteData = new WebSiteData(region)
+                {
+                    SiteConfig = new SiteConfigProperties()
+                    {
+                        WindowsFxVersion = "PricingTier.StandardS1",
+                        NetFrameworkVersion = "NetFrameworkVersion.V4_6",
+                        PhpVersion = "PhpVersion.V5_6",
+                        ConnectionStrings =
+                        {
+                            new ConnStringInfo()
+                            {
+                                Name = "storage.connectionString",
+                                ConnectionString = connectionString,
+                                ConnectionStringType = ConnectionStringType.Custom
+                            }
+                        },
+                        AppSettings =
+                        {
+                            new AppServiceNameValuePair()
+                            {
+                                Name = "storage.containerName",
+                                Value = containerName
+                            },
+                            new AppServiceNameValuePair()
+                            {
+                                Name = "PORT",
+                                Value = "8080"
+                            }
+                        },
+                    },
 
-                Utilities.Log("Created web app " + app1.Name);
-                Utilities.Print(app1);
+                };
+                var webSite_lro = await webSiteCollection.CreateOrUpdateAsync(Azure.WaitUntil.Completed, app1Name, webSiteData);
+                var webSite = webSite_lro.Value;
+
+                Utilities.Log("Created web app " + webSite.Data.Name);
+                Utilities.Print(webSite);
 
                 //============================================================
                 // Deploy a web app that connects to the storage account
@@ -92,17 +129,21 @@ namespace ManageLinuxWebAppStorageAccountConnection
 
                 Utilities.Log("Deploying azure-samples-blob-traverser.war to " + app1Name + " through FTP...");
 
+                var csm = new CsmPublishingProfile()
+                {
+                    Format = PublishingProfileFormat.Ftp
+                };
                 Utilities.UploadFileToWebApp(
-                    app1.GetPublishingProfile(),
+                    await webSite.GetPublishingProfileXmlWithSecretsAsync(csm),
                     Path.Combine(Utilities.ProjectPath, "Asset", "azure-samples-blob-traverser.war"));
 
-                Utilities.Log("Deployment azure-samples-blob-traverser.war to web app " + app1.Name + " completed");
-                Utilities.Print(app1);
+                Utilities.Log("Deployment azure-samples-blob-traverser.war to web app " + webSite.Data.Name + " completed");
+                Utilities.Print(webSite);
 
                 // warm up
                 Utilities.Log("Warming up " + app1Url + "/azure-samples-blob-traverser...");
                 Utilities.CheckAddress("http://" + app1Url + "/azure-samples-blob-traverser");
-                SdkContext.DelayProvider.Delay(5000);
+                Thread.Sleep(5000);
                 Utilities.Log("CURLing " + app1Url + "/azure-samples-blob-traverser...");
                 Utilities.Log(Utilities.CheckAddress("http://" + app1Url + "/azure-samples-blob-traverser"));
             }
@@ -111,7 +152,7 @@ namespace ManageLinuxWebAppStorageAccountConnection
                 try
                 {
                     Utilities.Log("Deleting Resource Group: " + rgName);
-                    azure.ResourceGroups.BeginDeleteByName(rgName);
+                    await resourceGroup.DeleteAsync(WaitUntil.Completed);
                     Utilities.Log("Deleted Resource Group: " + rgName);
                 }
                 catch (NullReferenceException)
@@ -125,24 +166,23 @@ namespace ManageLinuxWebAppStorageAccountConnection
             }
         }
 
-        public static void Main(string[] args)
+        public static async Task Main(string[] args)
         {
             try
             {
                 //=================================================================
                 // Authenticate
-                var credentials = SdkContext.AzureCredentialsFactory.FromFile(Environment.GetEnvironmentVariable("AZURE_AUTH_LOCATION"));
-
-                var azure = Azure
-                    .Configure()
-                    .WithLogLevel(HttpLoggingDelegatingHandler.Level.Basic)
-                    .Authenticate(credentials)
-                    .WithDefaultSubscription();
+                var clientId = Environment.GetEnvironmentVariable("CLIENT_ID");
+                var clientSecret = Environment.GetEnvironmentVariable("CLIENT_SECRET");
+                var tenantId = Environment.GetEnvironmentVariable("TENANT_ID");
+                var subscription = Environment.GetEnvironmentVariable("SUBSCRIPTION_ID");
+                ClientSecretCredential credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
+                ArmClient client = new ArmClient(credential, subscription);
 
                 // Print selected subscription
-                Utilities.Log("Selected subscription: " + azure.SubscriptionId);
+                Utilities.Log("Selected subscription: " + client.GetSubscriptions().Id);
 
-                RunSample(azure);
+                await RunSample(client);
             }
             catch (Exception e)
             {
